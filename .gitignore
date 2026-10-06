@@ -1,16 +1,13 @@
 # Ignore log files
-
 *. log
-# Ignore build folder
 
+# Ignore build folder
 build/
 
 # Ignore VS Code settings
-
-.vscode
+.vscode/
 
 # Ignore environment file
-
 .env
 
 # Ignore macOS files
