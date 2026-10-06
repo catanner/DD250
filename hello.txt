@@ -1,1 +1,701 @@
-Hello Git!
+#Set up
+import time
+from datetime import date
+start_time: float = time.time()
+
+import os
+import sys
+import pandas as pd
+import numpy as np
+import polars as pl
+import xlsxwriter as xw
+import openpyxl
+import pyodbc as db
+import glob as glb
+
+
+
+
+
+sys.path.insert(0, r'\\ftwgroups\fa22\ftspares\! - Active\Financial Management\IFG\Python Repository\Scripts\References')
+from common_functions_cat import HanaQuery, DebugExport
+
+sys.path.insert(0,r'\\ftwgroups\fa22\ftspares\! - Active\Financial Management\IFG\Python Repository\Scripts\References')
+from sql_dictionaries_cat import CMPREPFormat, PrpsFormat, VbapFormat, VbakFormat
+
+print("--- Import Complete: %s seconds ---" % round(time.time() - start_time,2))
+
+
+
+def log_df_summary(name: str, df: pd.DataFrame, preview_rows: int = 5) -> None:
+    print(name)
+    print(f"shape={df.shape}")
+    print(df.head(preview_rows))
+    print(df.info())
+    print(df.columns.tolist())
+
+
+def timed_hana_query(label: str, sql: str) -> pd.DataFrame:
+    query_start = time.time()
+    print(f"Starting {label} HanaQuery...")
+    df = HanaQuery(sql)
+    print(
+        f"Finished {label} HanaQuery in {round(time.time() - query_start, 2)} seconds; "
+        f"rows={len(df)}, cols={len(df.columns)}"
+    )
+    return df
+
+#ExhibitF File Reference
+df_exhibitf: pd.DataFrame = pd.read_excel(
+    r'\\ftwgroups\fa22\ftspares\! - Active\Financial Management\IFG\Python Repository\Scripts\F-35_DD250\ExhibitF.xlsx',
+    sheet_name='Repair_Compilation2',
+    usecols=['PARTNO', 'CLIN', 'ELIN'],
+    dtype={'CLIN': str},
+)
+
+cols_to_remove = ['ORD-QTY', 'PRCH-UNIT', 'UNIT-PRC','PQA-SITE','ACPT-SITE','FOB-SITE','ACRN','UNIT-PRC','Milstrip','System','Supplier','Customer']  # replace with real column names
+df_exhibitf = df_exhibitf.drop(columns=cols_to_remove, errors='ignore')
+# log_df_summary('df_exhibitf', df_exhibitf)
+
+#WBS Description File Reference
+df_repair_WBS_desc: pd.DataFrame = pd.read_excel(
+    r'\\ftwgroups\fa22\ftspares\! - Active\Financial Management\IFG\Python Repository\Scripts\F-35_DD250\SUSA18-AVSC25 Repair WBS Descriptions.xlsx',
+    sheet_name='Sheet1',
+    usecols=['Object number', 'Repair Type'],
+)
+
+df_repair_WBS_desc.columns = df_repair_WBS_desc.columns.str.replace(' ','_')
+
+cols_to_remove = ['Acct', 'Alloc_Ind', 'Appl.no.', 'ARCU_Code', 'BA', 'Bill', 'Bill.plan', 'Billing_Pseudo_Req', 'Business_Unit_Acronym', 'CA_Sales_Tax_Indicator', 'CC_Exclusion', 'CCtr_post.', 'Change_No.', 'Changed_by', 'Changed_on', 'CoCd', 'Commercial_Material_Ind', 'Cost_account_funded_through', 'Cost_of_Money_Code', 'Costing_Variant', 'CostObject', 'CostSh', 'Created_by', 'Created_on', 'CtrA', 'CtrA.1', 'CtrA.2', 'DD250_Ind', 'Delivery_Order', 'Description', 'DistPrf', 'DlI', 'Functional_Area', 'Gov_priority_number_assigned_and_identif', 'Ground_Rule', 'GS_ILS_Level_ID', 'Lev', 'Marketing_Code', 'Master_Requisition_Code', 'Material_Segment', 'MRP', 'NAICS_Census_Code', 'NAICS_Code', 'Name_of_resp.person', 'P', 'Plnt', 'OH_key', 'PoP_Override_Date', 'Procurement_Code', 'SIC', 'ICAS_Project_ID', 'Program_Office_Code']  # replace with real column names
+df_repair_WBS_desc = df_repair_WBS_desc.drop(columns=cols_to_remove, errors='ignore')
+
+repair_types = ['Make', 'OEM', 'PBL']
+df_repair_WBS_desc = df_repair_WBS_desc[df_repair_WBS_desc['Repair_Type'].isin(repair_types)]
+# log_df_summary('df_repair_WBS_desc', df_repair_WBS_desc)
+
+
+#SQL CMPREP
+sql_cmprep: str = (f'''SELECT VKBUR,
+                         VKGRP,
+                         QMNUM,
+                         IWERK,
+                         MATNR,
+                         SERIALNR,
+                         QMTXT,
+                         QMDAT,
+                         QMDAB,
+                         AUFNR,
+                         VBELN,
+                         ZZ_POSNR_CUSTDMD,
+                         PS_PSP_PNR,
+                         KWMENG,
+                         BANFN,
+                         EBELN,
+                         EBELP,
+                         LIFNR,
+                         NAME1,
+                         SHP_DOC_DESC,
+                         ZZ_CONTLINENO,
+                         DLFL_STAT,
+                         OUTSTANDING,
+                         POSTPONED,
+                         INPROCESS,
+                         COMPLETE
+                    FROM HANADB."ZPM_CMPREP_EDW"
+                    WHERE VKBUR = 'F35'
+                    AND VKGRP = 'LRP'
+                    AND QMDAT >= '20240701'
+                    AND PS_PSP_PNR != '00000000'
+                    AND NAME1 != 'Q94146'
+                    AND NAME1 NOT LIKE 'SW%'
+                    AND NAME1 NOT LIKE 'Dummy%'
+                    AND NAME1 NOT LIKE '%ceva%'
+                    AND NAME1 NOT LIKE '190356%'
+                    AND DLFL_STAT != 'X';''')
+
+df_cmprep = HanaQuery(sql_cmprep)
+CMPREPFormat(df_cmprep)
+df_cmprep.columns = df_cmprep.columns.str.replace(' ','_')
+
+# Map ship doc codes to descriptions
+ship_doc_map = {
+    'NONE (Non GS':'00',
+    'WAWF DD250':'01',
+    'NON-WAWF DD250':'02',
+    'WAWF DCS':'03',
+    'DD1348-1A':'04',
+    'VENDOR DD250':'05',
+    'COMMERCIAL SHIPPING':'06'
+}
+
+df_cmprep: pd.DataFrame = df_cmprep.rename(columns={'CLIN/SLIN':'CLIN'})
+
+
+
+#PRPS Pull for Contract Info
+relevant_wbs = df_cmprep['WBS_Element_(Unconverted)'].unique().tolist()
+# relevant_wbs = filter(lambda x: x is not None, relevant_wbs)  # Remove None values
+
+relevant_wbs = tuple(relevant_wbs)
+sql_prps: str = (f'''SELECT POSID,
+                       PSPNR,
+                       POST1,
+                       OBJNR,
+                       ZZ_CONTROL_ACCNT,
+                       ZZ_ICAS_PROJID_L,
+                       ZZ_PRIMCONTNO,
+                       ZZ_DELIVERY_ORD,
+                       ZZ_CLIN_NO
+                FROM HANADB."PRPS"
+                WHERE PSPNR IN {relevant_wbs};''')
+
+
+df_prps = HanaQuery(sql_prps)
+PrpsFormat(df_prps)
+df_prps.columns = df_prps.columns.str.replace(' ', '_')
+
+
+
+
+#Merge PRPS info to cmprep based on WBS element to enable Contract info comparison and Repair Type lookup based on WBS description (which will be merged back to cmprep later for Repair Type lookup based on WBS)
+df_cmprep_prps: pd.DataFrame = pd.merge(df_cmprep, df_prps, on = 'WBS_Element_(Unconverted)', how='left')
+
+
+#Rename columns in ExhibitF for clarity and to enable merging with cmprep (Root_Part_Number will be used for merging with Material column in cmprep after creating a lookup column based on root PN and CLIN)
+df_exhibitf: pd.DataFrame = df_exhibitf.rename(columns={'PARTNO':'Root_Part_Number'})
+
+#Create lookup material column based on root PN and CLIN
+def get_root_part_number(string, char):
+     last_index = string.rfind(char)
+     if last_index == -1:
+          return string  # Character not found, return the whole string
+     else:
+          return string[:last_index]
+df_cmprep['Root_Part_Number'] = df_cmprep['Material'].astype(str).apply(lambda x: get_root_part_number(x, '-'))
+
+# ...existing code...
+df_cmprep.columns = df_cmprep.columns.astype(str).str.strip()
+df_exhibitf.columns = df_exhibitf.columns.astype(str).str.strip()
+
+#Merge ExhibitF info to cmprep based on Root Part Number and CLIN to enable ELIN comparison between Exhibit and Sales Order (which will be merged back to cmprep later)
+df_cmprep_exhibit: pd.DataFrame = pd.merge(df_cmprep, df_exhibitf[['Root_Part_Number','CLIN','ELIN']], on=['Root_Part_Number','CLIN'], how='left')
+df_cmprep_exhibit = df_cmprep_exhibit.rename(columns={'ELIN':'ELIN_Exhibit'})
+
+df_cmprep: pd.DataFrame = pd.merge(df_cmprep_prps, df_cmprep_exhibit[['Material', 'Notification', 'ELIN_Exhibit']], on=['Notification'], how='left')
+
+
+#Create filtered dataframe to enable Repair_Type lookup based on WBS description, filtering to only include relevant repair types (this will be merged back to cmprep later for Repair_Type lookup based on WBS)
+filtered_df = df_repair_WBS_desc[df_repair_WBS_desc['Repair_Type'].isin(['OEM', 'PBL', 'Make'])]
+
+print('filtered_df')
+
+
+print('df_cmprep_exhibit')
+
+
+
+
+
+
+# # normalize common variants
+# df_cmprep = df_cmprep.rename(columns={"Clin": "CLIN", "CLIN ": "CLIN"})
+# df_exhibitf = df_exhibitf.rename(columns={"Clin": "CLIN", "CLIN ": "CLIN"})
+
+
+
+# quick validation
+# required_left = {"Root_Part_Number", "CLIN"}
+# required_right = {"Root_Part_Number", "CLIN", "ELIN"}
+
+# missing_left = required_left - set(df_cmprep.columns)
+# missing_right = required_right - set(df_exhibitf.columns)
+# if missing_left:
+#     raise KeyError(f"df_cmprep missing: {sorted(missing_left)}")
+# if missing_right:
+#     raise KeyError(f"df_exhibitf missing: {sorted(missing_right)}")
+
+# df_cmprep = pd.merge(
+#     df_cmprep,
+#     df_exhibitf[["Root_Part_Number", "CLIN", "ELIN"]],
+#     on=["Root_Part_Number", "CLIN"],
+#     how="left"
+# )
+
+
+# df_cmprep: pd.DataFrame = pd.merge(df_cmprep, df_cmprep_exhibit, on=['Root_Part_Number'], how='left')
+
+
+#VBAP Pull for Contract Comparison
+relevant_wbs = tuple(df_cmprep['WBS_Element_(Unconverted)'].unique())
+sql_vbap: str = (f'''SELECT VBELN,
+                            POSNR,
+                            PS_PSP_PNR,
+                            ZZ_CONTLINENO,
+                            ZZ_PRIME_ELIN,
+                            ZZ_SHIP_DOC_TYPE
+                     FROM HANADB."VBAP"
+                     WHERE PS_PSP_PNR IN {relevant_wbs};''')
+
+
+df_vbap: pd.DataFrame = HanaQuery(sql_vbap)
+VbapFormat(df_vbap)
+df_vbap.columns = df_vbap.columns.str.replace(' ','_')
+
+print('df_vbap')
+
+
+
+
+#VBAK Pull for Comparison
+relevant_so = tuple(df_vbap['SD_Document'].unique())
+sql_vbak: str = (f'''SELECT VBELN,
+                             BSTNK
+                      FROM HANADB."VBAK"
+                      WHERE VBELN IN {relevant_so};''')
+
+
+df_vbak: pd.DataFrame = HanaQuery(sql_vbak)
+VbakFormat(df_vbak)
+df_vbak.columns = df_vbak.columns.str.replace(' ','_')
+
+print('df_vbak')
+
+
+
+#Merge VBAP and VBAK to get Sales Order info along with ELIN for comparison with Exhibit ELIN, merging on Sales Order number (VBELN) which is present in both tables (as SD_Document in VBAP and as VBELN in VBAK)
+df_sales_orders = pd.merge(df_vbap, df_vbak,
+                        on='SD_Document',
+                        how='inner')
+
+
+#Rename columns for clarity before merging back to cmprep
+df_sales_orders = df_sales_orders.rename(columns={'SD_Document':'Sales_Order', 'PRM_ELIN': 'ELIN_SO', 'POSNR':'SO Line Item'})
+
+
+# #Merge sales order info back to cmprep
+# df_cmprep = pd.merge(df_cmprep, df_sales_orders[['Sales_Order', 'ELIN_SO']], on='Sales_Order', how='inner')
+df_cmprep = pd.merge(df_cmprep, df_sales_orders[['Sales_Order', 'ELIN_SO']], on='Sales_Order', how='left')
+
+#Fill NaN values in ELIN columns with empty strings for accurate comparison
+df_cmprep['ELIN_Exhibit'] = df_cmprep['ELIN_Exhibit'].fillna('')
+df_cmprep['ELIN_SO'] = df_cmprep['ELIN_SO'].fillna('')
+
+#Remove spaces from ELIN columns to ensure accurate comparison (if spaces are not meaningful)
+df_cmprep['ELIN_Exhibit'] = df_cmprep['ELIN_Exhibit'].replace(' ', '')
+df_cmprep['ELIN_SO'] = df_cmprep['ELIN_SO'].replace(' ', '')
+
+
+#Create ELIN_Compare column to identify matches between Exhibit and Sales Order ELINs
+df_cmprep['ELIN_Compare'] = df_cmprep['ELIN_Exhibit'] == df_cmprep['ELIN_SO']
+
+#Create Repair_Type column based on WBS description lookup, defaulting to 'Unknown' if no match found
+repair_type_lookup = (
+    df_repair_WBS_desc[['Object_number', 'Repair_Type']]
+    .dropna(subset=['Object_number'])
+    .drop_duplicates(subset=['Object_number'])
+    .set_index('Object_number')['Repair_Type']
+)
+df_cmprep['Repair_Type'] = df_cmprep['OBJ_NUM'].map(repair_type_lookup).fillna('Unknown')
+
+
+# #Filter to only include rows where Repair_Type is OEM, PBL, or Make, and where ELIN_Compare is False (indicating a mismatch between Exhibit and Sales Order ELINs)
+# df_cmprep = df_cmprep[df_cmprep['Repair_Type'].isin(['OEM', 'PBL', 'Make'])]
+# df_cmprep = df_cmprep[df_cmprep['ELIN_Compare'].fillna(False) == False]
+
+
+#Print time taken for entire process up to this point
+print("--- Run Time: %s seconds ---" % round(time.time() - start_time,2))
+
+
+#Debug export before final cleaning and export
+DebugExport(df_cmprep, user_id='e479246')
+
+
+#Drop columns with identical values to reduce clutter in final output
+def drop_identical_columns(df: pd.DataFrame) -> pd.DataFrame:
+    cols = list(df.columns)
+    to_drop = set()
+
+    for i, c1 in enumerate(cols):
+        if c1 in to_drop:
+            continue
+        for c2 in cols[i + 1:]:
+            if c2 in to_drop:
+                continue
+            # True when values are identical (NaN in same positions also counts as equal)
+            if df[c1].equals(df[c2]):
+                to_drop.add(c2)
+
+    return df.drop(columns=list(to_drop))
+
+
+# Apply right before export
+df_cmprep = drop_identical_columns(df_cmprep)
+
+df_cmprep.columns = df_cmprep.columns.str.replace('_', ' ', regex=False)
+
+
+df_cmprep.rename(columns={
+    'Material x': 'Material',
+    "PO Item":"Sales Order Line Item"
+}, inplace=True)
+
+date_cols = [
+    'Notif.date',
+    'DtNotificationComp'
+]
+
+valid_date_cols = [c for c in date_cols if c in df_cmprep.columns]
+if valid_date_cols:
+    df_cmprep[valid_date_cols] = df_cmprep[valid_date_cols].apply(
+        lambda s: pd.to_datetime(s, errors="coerce").dt.strftime("%m/%d/%Y")
+    )
+
+# Remove rows with 'Unknown' Repair Type
+df_cmprep = df_cmprep[df_cmprep['Repair Type'] != 'Unknown']
+
+# Map descriptions back to codes for output
+ship_doc_map = {
+    'COMMERCIAL SHIPPING': '06',
+    'VENDOR DD250': '05',
+    'DD1348-1A': '04',
+    'WAWF DCS': '03',
+    'NON-WAWF DD250': '02',
+    'WAWF DD250': '01',
+    'NONE (Non GS': '00'
+}
+
+# Merge duplicate CLIN columns - take first non-null value
+clin_cols = [col for col in df_cmprep.columns if 'CLIN' in col and col != 'CLIN']
+if len(clin_cols) > 1:
+    # Combine all CLIN columns, preferring left-most non-null value
+    df_cmprep['CLIN'] = df_cmprep[clin_cols].bfill(axis=1).iloc[:, 0]
+    # Drop the duplicate CLIN columns
+    df_cmprep = df_cmprep.drop(columns=clin_cols)
+elif len(clin_cols) == 1 and 'CLIN' not in df_cmprep.columns:
+    # Normalize a single merged CLIN-like column name back to CLIN
+    df_cmprep = df_cmprep.rename(columns={clin_cols[0]: 'CLIN'})
+
+desired_order = [
+     'Sales Office',
+     'Sales Group',
+     'Material',
+     'Planning plant',
+     'Serial Number',
+     'Notification',
+     'Notification Description',
+     'Notif.date',
+     'DtNotificationComp',
+     'Service Order',
+     'Sales Order',
+     'SO Line Item',
+     'WBS Element (Unconverted)',
+     'Order Quantity',
+     'Purchase Req.',
+     'SAP PO Number',
+     'PO Item',
+     'Vendor',
+     'Supplier Name',
+     'WBS Element',
+     'WBS Description',
+     'Control Account',
+     'PRIME CONT NO',
+     'DLVRY ORD',
+     'Project ID',
+     'OBJ NUM',
+     'Repair Type',
+     'Ship Doc Type Req',
+     'CLIN',
+     'ELIN Exhibit',
+     'ELIN SO',
+     'ELIN Compare',
+     'Doc Type Compare'
+]
+
+existing_desired = [c for c in desired_order if c in df_cmprep.columns]
+remaining = [c for c in df_cmprep.columns if c not in existing_desired]
+df_cmprep = df_cmprep[existing_desired + remaining]
+
+if 'Ship Doc Type Req' in df_cmprep.columns:
+    df_cmprep['Ship Doc Type Req'] = df_cmprep['Ship Doc Type Req'].replace(ship_doc_map)
+
+df_cmprep['Doc Type Compare'] = True  # default to True
+
+# mask = (df_cmprep['ELIN Compare'] == True) & (
+#     (df_cmprep['Ship Doc Type Req'].isna()) |
+#     (df_cmprep['Ship Doc Type Req'] == '') |
+#     (df_cmprep['Ship Doc Type Req'] == '06')
+# )
+
+
+# Condition 1: ELIN Compare is True AND Ship Doc Type Req is blank or '06'
+mask_true = (
+    (df_cmprep['ELIN Compare'] == True) &
+    (
+        (df_cmprep['Ship Doc Type Req'].isna()) |
+        (df_cmprep['Ship Doc Type Req'] == '') |
+        (df_cmprep['Ship Doc Type Req'] == '06')
+    )
+)
+
+
+# Condition 2: ELIN Compare is False AND Ship Doc Type Req is blank or '06'
+mask_false = (
+    (df_cmprep['ELIN Compare'] == False) &
+    (
+        (df_cmprep['Ship Doc Type Req'].isna()) |
+        (df_cmprep['Ship Doc Type Req'] == '') |
+        (df_cmprep['Ship Doc Type Req'] == '06')
+    )
+)
+
+# # Apply both conditions
+# df_cmprep.loc[mask_true, 'Doc Type Compare'] = False
+# df_cmprep.loc[mask_false, 'Doc Type Compare'] = False
+
+
+# df_cmprep.loc[mask, 'Doc Type Compare'] = False
+
+
+df_cmprep.loc[mask_true | mask_false, 'Doc Type Compare'] = False
+
+# ELIN Compare: False if ELIN Exhibit or ELIN SO is blank/null
+df_cmprep['ELIN Compare'] = ~(
+    df_cmprep['ELIN Exhibit'].isna() |
+    (df_cmprep['ELIN Exhibit'] == '') |
+    df_cmprep['ELIN SO'].isna() |
+    (df_cmprep['ELIN SO'] == '')
+)
+
+# Where both are populated, compare values
+both_populated = (
+    df_cmprep['ELIN Exhibit'].notna() & (df_cmprep['ELIN Exhibit'] != '') &
+    df_cmprep['ELIN SO'].notna() & (df_cmprep['ELIN SO'] != '')
+)
+
+df_cmprep.loc[both_populated, 'ELIN Compare'] = (
+    df_cmprep.loc[both_populated, 'ELIN Exhibit'] ==
+    df_cmprep.loc[both_populated, 'ELIN SO']
+)
+
+# Retain only discrepancies in either comparison for all output workbooks.
+mismatch_mask = (
+    (
+        df_cmprep['Doc Type Compare'].eq(False) |
+        df_cmprep['ELIN Compare'].eq(False)
+    ) &
+    df_cmprep['Notif Complete'].astype('string').str.strip().eq('X')
+)
+df_cmprep = df_cmprep.loc[mismatch_mask].copy()
+
+print('df_cmprep')
+log_df_summary('df_cmprep', df_cmprep)
+
+output_date = date.today().strftime('%m.%d.%Y')
+merged_output_file = os.path.join(
+    r'C:\Users\e479246\Lockheed Martin US\US-Aero-SustOps-SOL-SIL - F-35 Repair of Repairables\01.01 - STAVSC-24 (FY25)\01 - CLIN 2001, 2002, 2003 (Air Vehicle)\DD250\Weekly File Output',
+    f'DD250 {output_date}.xlsx',
+)
+df_cmprep.to_excel(merged_output_file, index=False, sheet_name='Sheet1')
+wb_merged = openpyxl.load_workbook(merged_output_file)
+ws_merged = wb_merged['Sheet1']
+ws_merged.auto_filter.ref = ws_merged.dimensions
+
+
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
+from openpyxl.formatting.rule import CellIsRule
+from openpyxl.utils import get_column_letter
+
+# Apply the same formatting to the dated output workbook.
+print('Formatting dated workbook...')
+wb = wb_merged
+ws = ws_merged
+
+df_output = df_cmprep.copy()
+
+cols = ["Ship Doc Type Req", "ELIN Exhibit", "ELIN SO"]
+
+
+# Example: your known header names in the file
+left_header = "ELIN Exhibit"
+right_header = "ELIN SO"
+new_header = "ELINs"
+
+# Optional: normalize incoming headers first (helps if there are extra spaces/case issues)
+df_output.columns = df_output.columns.astype(str).str.strip()
+
+# Validate required headers exist
+required = [left_header, right_header]
+missing = [c for c in required if c not in df_output.columns]
+if missing:
+    raise KeyError(f"Missing required headers: {missing}")
+
+# Trim + concat with '-'
+left = df_output[left_header].fillna("").astype(str).str.strip()
+right = df_output[right_header].fillna("").astype(str).str.strip()
+
+# If either side can be blank, this avoids leading/trailing '-'
+df_output[new_header] = (left + "-" + right).str.strip("-")
+
+
+print ('df_output')
+print(df_output.head())
+print(df_output.columns)
+print(df_output[new_header].head())
+
+red = PatternFill(start_color="FB7F75", end_color="FB7F75", fill_type="solid")
+
+# Map header -> column index
+headers = {cell.value: idx for idx, cell in enumerate(ws[1], start=1)}
+
+# Use conditional formatting instead of per-row Python loops so large exports finish quickly.
+col_doc_type = headers.get("Doc Type Compare")
+if col_doc_type:
+    doc_type_range = f"{get_column_letter(col_doc_type)}2:{get_column_letter(col_doc_type)}{ws.max_row}"
+    ws.conditional_formatting.add(
+        doc_type_range,
+        CellIsRule(operator="equal", formula=['FALSE'], fill=red)
+    )
+
+col_elin_cmp = headers.get("ELIN Compare")
+if col_elin_cmp:
+    elin_cmp_range = f"{get_column_letter(col_elin_cmp)}2:{get_column_letter(col_elin_cmp)}{ws.max_row}"
+    ws.conditional_formatting.add(
+        elin_cmp_range,
+        CellIsRule(operator="equal", formula=['FALSE'], fill=red)
+    )
+
+desired_order = [
+     'Sales Office',
+     'Sales Group',
+     'Material x',
+     'Planning plant',
+     'Serial Number',
+     'Notification',
+     'Notification Description',
+     'Notif.date',
+     'DtNotificationComp',
+     'Service Order',
+     'Sales Order',
+     'SO Line Item',
+     'WBS Element (Unconverted)',
+     'Order Quantity',
+     'Purchase Req.',
+     'SAP PO Number',
+     'PO Item',
+     'Vendor',
+     'Supplier Name',
+     'WBS Element',
+     'WBS Description',
+     'Control Account',
+     'PRIME CONT NO',
+     'DLVRY ORD',
+     'Project ID',
+     'OBJ NUM',
+     'Repair Type',
+     'Ship Doc Type Req',
+     'CLIN',
+     'ELIN Exhibit',
+     'ELIN SO',
+     'ELIN Compare',
+     'Doc Type Compare'
+]
+
+existing_desired = [c for c in desired_order if c in df_cmprep.columns]
+remaining = [c for c in df_cmprep.columns if c not in existing_desired]
+df_cmprep = df_cmprep[existing_desired + remaining]
+
+blanks_output_file = r'\\ftwgroups\fa22\ftspares\! - Active\Financial Management\IFG\Python Repository\Scripts\F-35_DD250\CMPREP_MergedwdoctypeTnF_Formatted_Blanks.xlsx'
+
+# Export strings for ELIN Compare so Excel filter value is stable as TRUE/FALSE text.
+df_output_export = df_output.copy()
+if 'ELIN Compare' in df_output_export.columns:
+    df_output_export['ELIN Compare'] = df_output_export['ELIN Compare'].map({True: 'TRUE', False: 'FALSE'}).fillna('')
+
+df_output_export.to_excel(blanks_output_file, index=False, sheet_name='Sheet1')
+
+# Re-open blanks workbook and set table filters so the file opens already filtered.
+wb_blanks = load_workbook(blanks_output_file)
+ws_blanks = wb_blanks['Sheet1']
+
+headers_blanks = {cell.value: idx for idx, cell in enumerate(ws_blanks[1], start=1)}
+ws_blanks.auto_filter.ref = ws_blanks.dimensions
+
+col_elin_cmp_blanks = headers_blanks.get('ELIN Compare')
+if col_elin_cmp_blanks:
+    ws_blanks.auto_filter.add_filter_column(col_elin_cmp_blanks - 1, ['FALSE'])
+
+wb_blanks.save(blanks_output_file)
+wb.save(merged_output_file)
+print('Workbook formatting complete.')
+
+
+# # df_vn20.to_excel(
+# #     rf"C:\Users\{user_id}\Lockheed Martin US\US-Aero-SustOps-SOL-SIL - F-35 Repair of Repairables\13 - RoR Burndown Plan\ROR Burndown\_Developer\_Input\VN20.xlsx",
+# #     index=False,
+# # )
+
+
+# df_final: pd.DataFrame = pd.read_excel(r'\\ftwgroups\fa22\ftspares\! - Active\Financial Management\IFG\Python Repository\Scripts\F-35_DD250\CMPREP_MergedwdoctypeTnF_Formatted.xlsx')
+# print("--- Script Complete: %s seconds ---" % round(time.time() - start_time,2))
+
+# def _is_blank(s: pd.Series) -> pd.Series:
+#     s = s.astype("string").str.strip()
+#     return s.isna() | (s == "") | s.str.lower().isin(["nan", "none", "null", "<na>"])
+
+# mask_both_blank = _is_blank(df_final["ELIN SO"]) & _is_blank(df_final["ELIN Exhibit"])
+# df_final = df_final.loc[~mask_both_blank].copy()
+
+# print('df_final')
+# print(df_final)
+# print(df_final.info())
+# print(df_final.columns.tolist())
+# print(len(df_final))
+
+
+
+# df_final.to_excel(r'\\ftwgroups\fa22\ftspares\! - Active\Financial Management\IFG\Python Repository\Scripts\F-35_DD250\CMPREP_MergedwdoctypeTnF_Formatted_Blanks.xlsx', index=False, sheet_name='Sheet1')
+
+
+# import schedule
+# from schedule import every, repeat, run_pending
+# import time
+
+# def job():
+#     print('Scheduled job executed')
+
+
+# schedule.every().monday.at("07:45").do(job)
+
+# def job_with_argument(name):
+#     print(f"I am {name}")
+
+# schedule.every(10).seconds.do(job_with_argument, name="Cat")
+
+# while True:
+#     schedule.run_pending()
+#     time.sleep(1)
+    
+# @repeat(every().monday.at("07:45"))
+# def scheduled_job():
+#     print('Scheduled job executed')
+
+# while True:
+#     run_pending()
+#     time.sleep(1)
+    
+    
+#     import schedule
+# import time
+
+# def job_that_executes_once():
+#     # Do some work that only needs to happen once...
+#     return schedule.CancelJob
+
+# schedule.every().day.at('22:30').do(job_that_executes_once)
+
+# while True:
+#     schedule.run_pending()
+#     time.sleep(1)
