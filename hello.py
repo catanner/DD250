@@ -1,3 +1,7 @@
+#Page 11 change for git fetch example
+
+#Change file text in 'Create & Change Branch' part of tutorial
+
 #Set up
 import time
 from datetime import date
